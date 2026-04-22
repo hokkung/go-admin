@@ -230,11 +230,10 @@ func (a *Admin) handleList(c *fiber.Ctx, m *entityMeta) error {
 			return writeError(c, badRequest("invalid json body: "+err.Error()))
 		}
 	}
-	items, err := m.storage.List(c.Context(), metaFor(m))
-	if err != nil {
+	if err := validateQuery(m, &q); err != nil {
 		return writeError(c, err)
 	}
-	result, err := applyQuery(m, items, q)
+	result, err := m.storage.List(c.Context(), metaFor(m), q)
 	if err != nil {
 		return writeError(c, err)
 	}

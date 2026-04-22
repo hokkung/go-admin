@@ -13,26 +13,49 @@ type Storage interface {
 	Get(ctx context.Context, meta StorageMeta, id any) (reflect.Value, error)
 	Update(ctx context.Context, meta StorageMeta, id any, entity reflect.Value) (reflect.Value, error)
 	Delete(ctx context.Context, meta StorageMeta, id any) error
-	List(ctx context.Context, meta StorageMeta) ([]reflect.Value, error)
+	// List executes a pre-validated query against the backing store. The
+	// framework guarantees that every Filter/SortSpec references a field that
+	// is filterable/sortable on this entity, and that Page/PageSize are
+	// non-zero defaults, before reaching the storage.
+	List(ctx context.Context, meta StorageMeta, query ListQuery) (ListResult, error)
 }
 
 type StorageMeta struct {
-	Name    string
-	Type    reflect.Type
-	IDKind  reflect.Kind
-	NewZero func() reflect.Value
-	GetID   func(reflect.Value) any
-	SetID   func(reflect.Value, any) error
+	Name        string
+	Type        reflect.Type
+	IDKind      reflect.Kind
+	NewZero     func() reflect.Value
+	GetID       func(reflect.Value) any
+	SetID       func(reflect.Value, any) error
+	FieldByJSON map[string]StorageField
+}
+
+// StorageField exposes just enough reflection info for a storage adapter to
+// read a field's value or build a column reference without needing access to
+// the package-private fieldInfo.
+type StorageField struct {
+	JSONName string
+	Index    []int
+	Kind     reflect.Kind
 }
 
 func metaFor(m *entityMeta) StorageMeta {
+	fields := make(map[string]StorageField, len(m.fields))
+	for _, f := range m.fields {
+		fields[f.jsonName] = StorageField{
+			JSONName: f.jsonName,
+			Index:    f.index,
+			Kind:     f.kind,
+		}
+	}
 	return StorageMeta{
-		Name:    m.name,
-		Type:    m.typ,
-		IDKind:  m.idField.kind,
-		NewZero: m.newInstance,
-		GetID:   m.getID,
-		SetID:   m.setID,
+		Name:        m.name,
+		Type:        m.typ,
+		IDKind:      m.idField.kind,
+		NewZero:     m.newInstance,
+		GetID:       m.getID,
+		SetID:       m.setID,
+		FieldByJSON: fields,
 	}
 }
 
@@ -107,14 +130,14 @@ func (s *MemoryStorage) Delete(_ context.Context, _ StorageMeta, id any) error {
 	return nil
 }
 
-func (s *MemoryStorage) List(_ context.Context, _ StorageMeta) ([]reflect.Value, error) {
+func (s *MemoryStorage) List(_ context.Context, meta StorageMeta, q ListQuery) (ListResult, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]reflect.Value, 0, len(s.items))
+	items := make([]reflect.Value, 0, len(s.items))
 	for _, v := range s.items {
-		out = append(out, v)
+		items = append(items, v)
 	}
-	return out, nil
+	s.mu.RUnlock()
+	return ApplyInMemoryQuery(meta, items, q)
 }
 
 func (s *MemoryStorage) generateID(meta StorageMeta) (any, error) {
