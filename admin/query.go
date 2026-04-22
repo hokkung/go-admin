@@ -43,18 +43,54 @@ const (
 	opIn       = "in"
 )
 
-func applyQuery(m *entityMeta, items []reflect.Value, q ListQuery) (ListResult, error) {
+// validateQuery rejects filters / sort specs that reference non-whitelisted
+// fields, and applies the entity's list-config defaults (page, page_size,
+// max_page_size) in place. Storages can rely on the query being well-formed.
+func validateQuery(m *entityMeta, q *ListQuery) error {
+	for _, f := range q.Filters {
+		fi, ok := m.byJSON[f.Field]
+		if !ok || !fi.filterable {
+			return badRequest(fmt.Sprintf("field %q is not filterable", f.Field))
+		}
+	}
+	for _, s := range q.Sort {
+		fi, ok := m.byJSON[s.Field]
+		if !ok || !fi.sortable {
+			return badRequest(fmt.Sprintf("field %q is not sortable", s.Field))
+		}
+	}
+	cfg := m.effectiveListConfig()
+	if q.PageSize <= 0 {
+		q.PageSize = cfg.DefaultPageSize
+	}
+	if cfg.MaxPageSize > 0 && q.PageSize > cfg.MaxPageSize {
+		q.PageSize = cfg.MaxPageSize
+	}
+	if q.Page <= 0 {
+		q.Page = 1
+	}
+	return nil
+}
+
+// ApplyInMemoryQuery evaluates a ListQuery against an in-memory slice of
+// entity values. Useful for Storage implementations whose backend cannot
+// push predicates down into its own query language (MemoryStorage, test
+// doubles, etc.). The query is assumed to have been validated by the
+// framework — the only errors returned here are operator-level mismatches
+// (e.g. `contains` against a non-string field).
+func ApplyInMemoryQuery(meta StorageMeta, items []reflect.Value, q ListQuery) (ListResult, error) {
 	filtered := items
 	if len(q.Filters) > 0 {
 		out := make([]reflect.Value, 0, len(filtered))
 		for _, it := range filtered {
 			keep := true
 			for _, f := range q.Filters {
-				fi, ok := m.byJSON[f.Field]
-				if !ok || !fi.filterable {
-					return ListResult{}, badRequest(fmt.Sprintf("field %q is not filterable", f.Field))
+				sf, ok := meta.FieldByJSON[f.Field]
+				if !ok {
+					keep = false
+					break
 				}
-				match, err := matchFilter(reflect.Indirect(it).FieldByIndex(fi.index), f)
+				match, err := matchFilter(reflect.Indirect(it).FieldByIndex(sf.Index), f)
 				if err != nil {
 					return ListResult{}, err
 				}
@@ -71,25 +107,12 @@ func applyQuery(m *entityMeta, items []reflect.Value, q ListQuery) (ListResult, 
 	}
 
 	if len(q.Sort) > 0 {
-		for _, s := range q.Sort {
-			fi, ok := m.byJSON[s.Field]
-			if !ok || !fi.sortable {
-				return ListResult{}, badRequest(fmt.Sprintf("field %q is not sortable", s.Field))
-			}
-		}
-		sortItems(m, filtered, q.Sort)
+		sortItemsByMeta(meta, filtered, q.Sort)
 	}
 
 	total := len(filtered)
-	page, pageSize := q.Page, q.PageSize
-	if pageSize <= 0 {
-		pageSize = 20
-	}
-	if page <= 0 {
-		page = 1
-	}
-	start := (page - 1) * pageSize
-	end := start + pageSize
+	start := (q.Page - 1) * q.PageSize
+	end := start + q.PageSize
 	if start > total {
 		start = total
 	}
@@ -105,8 +128,8 @@ func applyQuery(m *entityMeta, items []reflect.Value, q ListQuery) (ListResult, 
 	return ListResult{
 		Items:    items2,
 		Total:    total,
-		Page:     page,
-		PageSize: pageSize,
+		Page:     q.Page,
+		PageSize: q.PageSize,
 	}, nil
 }
 
@@ -146,12 +169,15 @@ func matchFilter(field reflect.Value, f Filter) (bool, error) {
 	}
 }
 
-func sortItems(m *entityMeta, items []reflect.Value, specs []SortSpec) {
+func sortItemsByMeta(meta StorageMeta, items []reflect.Value, specs []SortSpec) {
 	sort.SliceStable(items, func(i, j int) bool {
 		for _, s := range specs {
-			fi := m.byJSON[s.Field]
-			a := reflect.Indirect(items[i]).FieldByIndex(fi.index)
-			b := reflect.Indirect(items[j]).FieldByIndex(fi.index)
+			sf, ok := meta.FieldByJSON[s.Field]
+			if !ok {
+				continue
+			}
+			a := reflect.Indirect(items[i]).FieldByIndex(sf.Index)
+			b := reflect.Indirect(items[j]).FieldByIndex(sf.Index)
 			c := compareValues(a, b)
 			if c == 0 {
 				continue
