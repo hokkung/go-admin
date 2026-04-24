@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,8 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/hokkung/go-admin/admin"
 	gormstore "github.com/hokkung/go-admin/admin/storage/gorm"
-	"github.com/hokkung/go-admin/example/cmd/model"
-
+	"github.com/lib/pq"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
@@ -42,13 +42,47 @@ func (s ProductStatus) Validate() error {
 	return fmt.Errorf("invalid status %q (allowed: active, inactive)", s)
 }
 
+type UUIDArray []uuid.UUID
+
+func (a *UUIDArray) Scan(src interface{}) error {
+	if src == nil {
+		*a = UUIDArray{}
+		return nil
+	}
+	var strs []string
+	if err := pq.Array(&strs).Scan(src); err != nil {
+		return err
+	}
+	res := make(UUIDArray, len(strs))
+	for i, s := range strs {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			return fmt.Errorf("invalid uuid: %w", err)
+		}
+		res[i] = id
+	}
+	*a = res
+	return nil
+}
+
+func (a UUIDArray) Value() (driver.Value, error) {
+	if len(a) == 0 {
+		return "{}", nil
+	}
+	strs := make([]string, len(a))
+	for i, u := range a {
+		strs[i] = u.String()
+	}
+	return pq.Array(strs).Value()
+}
+
 type Product struct {
 	ID        uuid.UUID       `json:"id" admin:"id" gorm:"primaryKey"`
 	Name      string          `json:"name" admin:"filterable,sortable"`
 	Price     float64         `json:"price" admin:"filterable,sortable"`
 	Stock     int             `json:"stock" admin:"sortable"`
 	Status    ProductStatus   `json:"status" admin:"filterable" gorm:"type:varchar(255)"`
-	UserIDs   model.UUIDArray `json:"user_ids" admin:"filterable" gorm:"type:uuid[]"`
+	UserIDs   UUIDArray       `json:"user_ids" admin:"filterable" gorm:"type:uuid[]"`
 	CreatedAt time.Time       `json:"created_at" admin:"readonly,sortable,filterable" gorm:"autoCreateTime"`
 	UpdatedAt time.Time       `json:"updated_at" admin:"readonly,sortable,filterable" gorm:"autoUpdateTime"`
 	DeletedAt gorm.DeletedAt  `json:"deleted_at" admin:"readonly,sortable,filterable"`
